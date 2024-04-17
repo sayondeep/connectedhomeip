@@ -151,6 +151,20 @@ static bool IsValidCATNumber(id _Nullable value)
     return self;
 }
 
+- (void)fetchAttributeDataForAllDevices:(MTRDeviceControllerDataStoreClusterDataHandler)clusterDataHandler
+{
+    __block NSDictionary<NSString *, id> * dataStoreSecureLocalValues = nil;
+    dispatch_sync(_storageDelegateQueue, ^{
+        if ([self->_storageDelegate respondsToSelector:@selector(valuesForController:securityLevel:sharingType:)]) {
+            dataStoreSecureLocalValues = [self->_storageDelegate valuesForController:self->_controller securityLevel:MTRStorageSecurityLevelSecure sharingType:MTRStorageSharingTypeNotShared];
+        }
+    });
+
+    if (dataStoreSecureLocalValues.count) {
+        clusterDataHandler([self _getClusterDataFromSecureLocalValues:dataStoreSecureLocalValues]);
+    }
+}
+
 - (nullable MTRCASESessionResumptionInfo *)findResumptionInfoByNodeID:(NSNumber *)nodeID
 {
     return [self _findResumptionInfoWithKey:ResumptionByNodeIDKey(nodeID)];
@@ -337,6 +351,14 @@ static bool IsValidCATNumber(id _Nullable value)
                             sharingType:MTRStorageSharingTypeNotShared];
 }
 
+- (BOOL)_bulkStoreAttributeCacheValues:(NSDictionary<NSString *, id<NSSecureCoding>> *)values
+{
+    return [_storageDelegate controller:_controller
+                            storeValues:values
+                          securityLevel:MTRStorageSecurityLevelSecure
+                            sharingType:MTRStorageSharingTypeNotShared];
+}
+
 - (BOOL)_removeAttributeCacheValueForKey:(NSString *)key
 {
     return [_storageDelegate controller:_controller
@@ -371,16 +393,31 @@ static NSString * sAttributeCacheEndpointIndexKeyPrefix = @"attrCacheEndpointInd
 
 - (nullable NSArray<NSNumber *> *)_fetchEndpointIndexForNodeID:(NSNumber *)nodeID
 {
+    if (!nodeID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return nil;
+    }
+
     return [self _fetchAttributeCacheValueForKey:[self _endpointIndexKeyForNodeID:nodeID] expectedClass:[NSArray class]];
 }
 
 - (BOOL)_storeEndpointIndex:(NSArray<NSNumber *> *)endpointIndex forNodeID:(NSNumber *)nodeID
 {
+    if (!nodeID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return NO;
+    }
+
     return [self _storeAttributeCacheValue:endpointIndex forKey:[self _endpointIndexKeyForNodeID:nodeID]];
 }
 
 - (BOOL)_deleteEndpointIndexForNodeID:(NSNumber *)nodeID
 {
+    if (!nodeID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return NO;
+    }
+
     return [self _removeAttributeCacheValueForKey:[self _endpointIndexKeyForNodeID:nodeID]];
 }
 
@@ -393,16 +430,31 @@ static NSString * sAttributeCacheClusterIndexKeyPrefix = @"attrCacheClusterIndex
 
 - (nullable NSArray<NSNumber *> *)_fetchClusterIndexForNodeID:(NSNumber *)nodeID endpointID:(NSNumber *)endpointID
 {
+    if (!nodeID || !endpointID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return nil;
+    }
+
     return [self _fetchAttributeCacheValueForKey:[self _clusterIndexKeyForNodeID:nodeID endpointID:endpointID] expectedClass:[NSArray class]];
 }
 
 - (BOOL)_storeClusterIndex:(NSArray<NSNumber *> *)clusterIndex forNodeID:(NSNumber *)nodeID endpointID:(NSNumber *)endpointID
 {
+    if (!nodeID || !endpointID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return NO;
+    }
+
     return [self _storeAttributeCacheValue:clusterIndex forKey:[self _clusterIndexKeyForNodeID:nodeID endpointID:endpointID]];
 }
 
 - (BOOL)_deleteClusterIndexForNodeID:(NSNumber *)nodeID endpointID:(NSNumber *)endpointID
 {
+    if (!nodeID || !endpointID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return NO;
+    }
+
     return [self _removeAttributeCacheValueForKey:[self _clusterIndexKeyForNodeID:nodeID endpointID:endpointID]];
 }
 
@@ -415,16 +467,31 @@ static NSString * sAttributeCacheClusterDataKeyPrefix = @"attrCacheClusterData";
 
 - (nullable MTRDeviceClusterData *)_fetchClusterDataForNodeID:(NSNumber *)nodeID endpointID:(NSNumber *)endpointID clusterID:(NSNumber *)clusterID
 {
+    if (!nodeID || !endpointID || !clusterID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return nil;
+    }
+
     return [self _fetchAttributeCacheValueForKey:[self _clusterDataKeyForNodeID:nodeID endpointID:endpointID clusterID:clusterID] expectedClass:[MTRDeviceClusterData class]];
 }
 
 - (BOOL)_storeClusterData:(MTRDeviceClusterData *)clusterData forNodeID:(NSNumber *)nodeID endpointID:(NSNumber *)endpointID clusterID:(NSNumber *)clusterID
 {
+    if (!nodeID || !endpointID || !clusterID || !clusterData) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return NO;
+    }
+
     return [self _storeAttributeCacheValue:clusterData forKey:[self _clusterDataKeyForNodeID:nodeID endpointID:endpointID clusterID:clusterID]];
 }
 
 - (BOOL)_deleteClusterDataForNodeID:(NSNumber *)nodeID endpointID:(NSNumber *)endpointID clusterID:(NSNumber *)clusterID
 {
+    if (!nodeID || !endpointID || !clusterID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return NO;
+    }
+
     return [self _removeAttributeCacheValueForKey:[self _clusterDataKeyForNodeID:nodeID endpointID:endpointID clusterID:clusterID]];
 }
 
@@ -510,7 +577,7 @@ static NSString * sAttributeCacheAttributeValueKeyPrefix = @"attrCacheAttributeV
 #endif
 
         for (NSNumber * endpointID in endpointIndex) {
-            // Fetch endpoint index
+            // Fetch cluster index
             NSArray<NSNumber *> * clusterIndex = [self _fetchClusterIndexForNodeID:nodeID endpointID:endpointID];
 
 #if ATTRIBUTE_CACHE_VERBOSE_LOGGING
@@ -518,7 +585,7 @@ static NSString * sAttributeCacheAttributeValueKeyPrefix = @"attrCacheAttributeV
 #endif
 
             for (NSNumber * clusterID in clusterIndex) {
-                // Fetch endpoint index
+                // Fetch attribute index
                 NSArray<NSNumber *> * attributeIndex = [self _fetchAttributeIndexForNodeID:nodeID endpointID:endpointID clusterID:clusterID];
 
 #if ATTRIBUTE_CACHE_VERBOSE_LOGGING
@@ -576,12 +643,12 @@ static NSString * sAttributeCacheAttributeValueKeyPrefix = @"attrCacheAttributeV
         NSMutableArray<NSNumber *> * endpointIndexCopy = [endpointIndex mutableCopy];
 
         for (NSNumber * endpointID in endpointIndex) {
-            // Fetch endpoint index
+            // Fetch cluster index
             NSArray<NSNumber *> * clusterIndex = [self _fetchClusterIndexForNodeID:nodeID endpointID:endpointID];
             NSMutableArray<NSNumber *> * clusterIndexCopy = [clusterIndex mutableCopy];
 
             for (NSNumber * clusterID in clusterIndex) {
-                // Fetch endpoint index
+                // Fetch attribute index
                 NSArray<NSNumber *> * attributeIndex = [self _fetchAttributeIndexForNodeID:nodeID endpointID:endpointID clusterID:clusterID];
                 NSMutableArray<NSNumber *> * attributeIndexCopy = [attributeIndex mutableCopy];
 
@@ -857,6 +924,11 @@ static NSString * sAttributeCacheAttributeValueKeyPrefix = @"attrCacheAttributeV
 
 - (nullable NSDictionary<MTRClusterPath *, MTRDeviceClusterData *> *)getStoredClusterDataForNodeID:(NSNumber *)nodeID
 {
+    if (!nodeID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return nil;
+    }
+
     __block NSMutableDictionary<MTRClusterPath *, MTRDeviceClusterData *> * clusterDataToReturn = nil;
     dispatch_sync(_storageDelegateQueue, ^{
         // Fetch node index
@@ -887,7 +959,7 @@ static NSString * sAttributeCacheAttributeValueKeyPrefix = @"attrCacheAttributeV
 #endif
 
         for (NSNumber * endpointID in endpointIndex) {
-            // Fetch endpoint index
+            // Fetch cluster index
             NSArray<NSNumber *> * clusterIndex = [self _fetchClusterIndexForNodeID:nodeID endpointID:endpointID];
 
 #if ATTRIBUTE_CACHE_VERBOSE_LOGGING
@@ -918,66 +990,216 @@ static NSString * sAttributeCacheAttributeValueKeyPrefix = @"attrCacheAttributeV
     return clusterDataToReturn;
 }
 
+// Utility for constructing dictionary of nodeID to cluster data from dictionary of storage keys
+- (nullable NSDictionary<NSNumber *, NSDictionary<MTRClusterPath *, MTRDeviceClusterData *> *> *)_getClusterDataFromSecureLocalValues:(NSDictionary<NSString *, id> *)secureLocalValues
+{
+    NSMutableDictionary<NSNumber *, NSDictionary<MTRClusterPath *, MTRDeviceClusterData *> *> * clusterDataByNodeToReturn = nil;
+
+    if (![secureLocalValues isKindOfClass:[NSDictionary class]]) {
+        return nil;
+    }
+
+    // Fetch node index
+    NSArray<NSNumber *> * nodeIndex = secureLocalValues[sAttributeCacheNodeIndexKey];
+
+    if (![nodeIndex isKindOfClass:[NSArray class]]) {
+        return nil;
+    }
+
+    for (NSNumber * nodeID in nodeIndex) {
+        if (![nodeID isKindOfClass:[NSNumber class]]) {
+            continue;
+        }
+
+        NSMutableDictionary<MTRClusterPath *, MTRDeviceClusterData *> * clusterDataForNode = nil;
+        NSArray<NSNumber *> * endpointIndex = secureLocalValues[[self _endpointIndexKeyForNodeID:nodeID]];
+
+        if (![endpointIndex isKindOfClass:[NSArray class]]) {
+            continue;
+        }
+
+        for (NSNumber * endpointID in endpointIndex) {
+            if (![endpointID isKindOfClass:[NSNumber class]]) {
+                continue;
+            }
+
+            NSArray<NSNumber *> * clusterIndex = secureLocalValues[[self _clusterIndexKeyForNodeID:nodeID endpointID:endpointID]];
+
+            if (![clusterIndex isKindOfClass:[NSArray class]]) {
+                continue;
+            }
+
+            for (NSNumber * clusterID in clusterIndex) {
+                if (![clusterID isKindOfClass:[NSNumber class]]) {
+                    continue;
+                }
+
+                MTRDeviceClusterData * clusterData = secureLocalValues[[self _clusterDataKeyForNodeID:nodeID endpointID:endpointID clusterID:clusterID]];
+                if (!clusterData) {
+                    continue;
+                }
+                if (![clusterData isKindOfClass:[MTRDeviceClusterData class]]) {
+                    continue;
+                }
+                MTRClusterPath * clusterPath = [MTRClusterPath clusterPathWithEndpointID:endpointID clusterID:clusterID];
+                if (!clusterDataForNode) {
+                    clusterDataForNode = [NSMutableDictionary dictionary];
+                }
+                clusterDataForNode[clusterPath] = clusterData;
+            }
+        }
+
+        if (clusterDataForNode.count) {
+            if (!clusterDataByNodeToReturn) {
+                clusterDataByNodeToReturn = [NSMutableDictionary dictionary];
+            }
+            clusterDataByNodeToReturn[nodeID] = clusterDataForNode;
+        }
+    }
+
+    return clusterDataByNodeToReturn;
+}
+
 - (void)storeClusterData:(NSDictionary<MTRClusterPath *, MTRDeviceClusterData *> *)clusterData forNodeID:(NSNumber *)nodeID
 {
+    if (!nodeID) {
+        MTR_LOG_ERROR("%s: unexpected nil input", __func__);
+        return;
+    }
+
+    if (!clusterData.count) {
+        MTR_LOG_ERROR("%s: nothing to store", __func__);
+        return;
+    }
+
     dispatch_async(_storageDelegateQueue, ^{
         NSUInteger storeFailures = 0;
 
+        NSMutableDictionary<NSString *, id<NSSecureCoding>> * bulkValuesToStore = nil;
+        if ([self->_storageDelegate respondsToSelector:@selector(controller:storeValues:securityLevel:sharingType:)]) {
+            bulkValuesToStore = [NSMutableDictionary dictionary];
+        }
+
+        // A map of endpoint => list of clusters modified for that endpoint so cluster indexes can be updated later
+        NSMutableDictionary<NSNumber *, NSMutableSet<NSNumber *> *> * clustersModified = [NSMutableDictionary dictionary];
+
+        // Write cluster specific data first
         for (MTRClusterPath * path in clusterData) {
             MTRDeviceClusterData * data = clusterData[path];
-
 #if ATTRIBUTE_CACHE_VERBOSE_LOGGING
             MTR_LOG_INFO("Attempt to store clusterData @ node 0x%016llX endpoint %u cluster 0x%08lX", nodeID.unsignedLongLongValue, path.endpoint.unsignedShortValue, path.cluster.unsignedLongValue);
 #endif
 
-            BOOL storeFailed = NO;
+            if (bulkValuesToStore) {
+                bulkValuesToStore[[self _clusterDataKeyForNodeID:nodeID endpointID:path.endpoint clusterID:path.cluster]] = data;
+            } else {
+                // Store cluster data
+                BOOL storeFailed = ![self _storeClusterData:data forNodeID:nodeID endpointID:path.endpoint clusterID:path.cluster];
+                if (storeFailed) {
+                    storeFailures++;
+                    MTR_LOG_INFO("Store failed for clusterData @ node 0x%016llX endpoint %u cluster 0x%08lX", nodeID.unsignedLongLongValue, path.endpoint.unsignedShortValue, path.cluster.unsignedLongValue);
+                }
+            }
+
+            // Note the cluster as modified for the endpoint
+            NSMutableSet<NSNumber *> * clustersInEndpoint = clustersModified[path.endpoint];
+            if (!clustersInEndpoint) {
+                clustersInEndpoint = [NSMutableSet set];
+                clustersModified[path.endpoint] = clustersInEndpoint;
+            }
+            [clustersInEndpoint addObject:path.cluster];
+        }
+
+        // Prepare to tally all endpoints touched
+        NSArray<NSNumber *> * endpointIndex = [self _fetchEndpointIndexForNodeID:nodeID];
+        BOOL endpointIndexModified = NO;
+        NSMutableArray<NSNumber *> * endpointIndexToStore;
+        if (endpointIndex) {
+            endpointIndexToStore = [endpointIndex mutableCopy];
+        } else {
+            endpointIndexToStore = [NSMutableArray array];
+            endpointIndexModified = YES;
+        }
+
+        for (NSNumber * endpointID in clustersModified) {
+            if (![endpointIndexToStore containsObject:endpointID]) {
+                [endpointIndexToStore addObject:endpointID];
+                endpointIndexModified = YES;
+            }
+
+            // Get cluster index from storage and prepare to tally clusters touched
+            NSSet * newClusters = clustersModified[endpointID];
+            NSArray<NSNumber *> * clusterIndex = [self _fetchClusterIndexForNodeID:nodeID endpointID:endpointID];
+            BOOL clusterIndexModified = NO;
+            NSMutableArray<NSNumber *> * clusterIndexToStore;
+            if (clusterIndex) {
+                clusterIndexToStore = [clusterIndex mutableCopy];
+            } else {
+                clusterIndexToStore = [NSMutableArray array];
+                clusterIndexModified = YES;
+            }
+
+            for (NSNumber * clusterID in newClusters) {
+                if (![clusterIndexToStore containsObject:clusterID]) {
+                    [clusterIndexToStore addObject:clusterID];
+                    clusterIndexModified = YES;
+                }
+            }
+
+            if (clusterIndexModified) {
+                if (bulkValuesToStore) {
+                    bulkValuesToStore[[self _clusterIndexKeyForNodeID:nodeID endpointID:endpointID]] = clusterIndexToStore;
+                } else {
+                    BOOL storeFailed = ![self _storeClusterIndex:clusterIndexToStore forNodeID:nodeID endpointID:endpointID];
+                    if (storeFailed) {
+                        storeFailures++;
+                        MTR_LOG_INFO("Store failed for clusterIndex @ node 0x%016llX endpoint %u", nodeID.unsignedLongLongValue, endpointID.unsignedShortValue);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Update endpoint index as needed
+        if (endpointIndexModified) {
+            if (bulkValuesToStore) {
+                bulkValuesToStore[[self _endpointIndexKeyForNodeID:nodeID]] = endpointIndexToStore;
+            } else {
+                BOOL storeFailed = ![self _storeEndpointIndex:endpointIndexToStore forNodeID:nodeID];
+                if (storeFailed) {
+                    storeFailures++;
+                    MTR_LOG_INFO("Store failed for endpointIndex @ node 0x%016llX", nodeID.unsignedLongLongValue);
+                }
+            }
+        }
+
+        // Check if node index needs updating / creation
+        NSArray<NSNumber *> * nodeIndex = [self _fetchNodeIndex];
+        NSArray<NSNumber *> * nodeIndexToStore = nil;
+        if (!nodeIndex) {
             // Ensure node index exists
-            NSArray<NSNumber *> * nodeIndex = [self _fetchNodeIndex];
-            if (!nodeIndex) {
-                nodeIndex = [NSArray arrayWithObject:nodeID];
-                storeFailed = ![self _storeNodeIndex:nodeIndex];
-            } else if (![nodeIndex containsObject:nodeID]) {
-                storeFailed = ![self _storeNodeIndex:[nodeIndex arrayByAddingObject:nodeID]];
-            }
-            if (storeFailed) {
-                storeFailures++;
-                MTR_LOG_INFO("Store failed for nodeIndex");
-                continue;
-            }
+            nodeIndexToStore = [NSArray arrayWithObject:nodeID];
+        } else if (![nodeIndex containsObject:nodeID]) {
+            nodeIndexToStore = [nodeIndex arrayByAddingObject:nodeID];
+        }
 
-            // Ensure endpoint index exists
-            NSArray<NSNumber *> * endpointIndex = [self _fetchEndpointIndexForNodeID:nodeID];
-            if (!endpointIndex) {
-                endpointIndex = [NSArray arrayWithObject:path.endpoint];
-                storeFailed = ![self _storeEndpointIndex:endpointIndex forNodeID:nodeID];
-            } else if (![endpointIndex containsObject:path.endpoint]) {
-                storeFailed = ![self _storeEndpointIndex:[endpointIndex arrayByAddingObject:path.endpoint] forNodeID:nodeID];
+        if (nodeIndexToStore) {
+            if (bulkValuesToStore) {
+                bulkValuesToStore[sAttributeCacheNodeIndexKey] = nodeIndexToStore;
+            } else {
+                BOOL storeFailed = ![self _storeNodeIndex:nodeIndexToStore];
+                if (storeFailed) {
+                    storeFailures++;
+                    MTR_LOG_INFO("Store failed for nodeIndex");
+                }
             }
-            if (storeFailed) {
-                storeFailures++;
-                MTR_LOG_INFO("Store failed for endpointIndex @ node 0x%016llX", nodeID.unsignedLongLongValue);
-                continue;
-            }
+        }
 
-            // Ensure cluster index exists
-            NSArray<NSNumber *> * clusterIndex = [self _fetchClusterIndexForNodeID:nodeID endpointID:path.endpoint];
-            if (!clusterIndex) {
-                clusterIndex = [NSArray arrayWithObject:path.cluster];
-                storeFailed = ![self _storeClusterIndex:clusterIndex forNodeID:nodeID endpointID:path.endpoint];
-            } else if (![clusterIndex containsObject:path.cluster]) {
-                storeFailed = ![self _storeClusterIndex:[clusterIndex arrayByAddingObject:path.cluster] forNodeID:nodeID endpointID:path.endpoint];
-            }
+        if (bulkValuesToStore) {
+            BOOL storeFailed = ![self _bulkStoreAttributeCacheValues:bulkValuesToStore];
             if (storeFailed) {
                 storeFailures++;
-                MTR_LOG_INFO("Store failed for clusterIndex @ node 0x%016llX endpoint %u", nodeID.unsignedLongLongValue, path.endpoint.unsignedShortValue);
-                continue;
-            }
-
-            // Store cluster data
-            storeFailed = ![self _storeClusterData:data forNodeID:nodeID endpointID:path.endpoint clusterID:path.cluster];
-            if (storeFailed) {
-                storeFailures++;
-                MTR_LOG_INFO("Store failed for clusterDAta @ node 0x%016llX endpoint %u cluster 0x%08lX", nodeID.unsignedLongLongValue, path.endpoint.unsignedShortValue, path.cluster.unsignedLongValue);
+                MTR_LOG_INFO("Store failed for bulk values count %lu", static_cast<unsigned long>(bulkValuesToStore.count));
             }
         }
 
