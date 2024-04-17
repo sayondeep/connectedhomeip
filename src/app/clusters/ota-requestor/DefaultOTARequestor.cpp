@@ -147,6 +147,20 @@ void DefaultOTARequestor::OnQueryImageResponse(void * context, const QueryImageR
     DefaultOTARequestor * requestorCore = static_cast<DefaultOTARequestor *>(context);
     VerifyOrDie(requestorCore != nullptr);
 
+    int protocol = -1;
+    std::string uriString(response.imageURI.HasValue() ? response.imageURI.Value().data() : "", response.imageURI.HasValue() ? response.imageURI.Value().size() : 0);
+
+    printf("\nImageURI: %s\n",uriString.c_str());
+
+    if(strncmp(uriString.c_str(), "bdx", 3)==0)
+    {
+        protocol = 0;
+    }
+    else if(strncmp(uriString.c_str(), "https", 5)==0)
+    {
+        protocol =2;
+    }
+
     switch (response.status)
     {
     case OTAQueryStatus::kUpdateAvailable: {
@@ -171,7 +185,7 @@ void DefaultOTARequestor::OnQueryImageResponse(void * context, const QueryImageR
 
         // The Operational Node ID in the host field SHALL match the NodeID of the OTA Provider responding with the
         // QueryImageResponse
-        if (update.nodeId != requestorCore->mProviderLocation.Value().providerNodeID)
+        if (protocol==0 && update.nodeId != requestorCore->mProviderLocation.Value().providerNodeID)
         {
             ChipLogError(SoftwareUpdate,
                          "The ImageURI provider node 0x" ChipLogFormatX64
@@ -197,21 +211,42 @@ void DefaultOTARequestor::OnQueryImageResponse(void * context, const QueryImageR
             requestorCore->mTargetVersion = update.softwareVersion;
             requestorCore->mUpdateToken   = updateToken;
 
-            // Store file designator needed for BDX transfers
-            MutableCharSpan fileDesignator(requestorCore->mFileDesignatorBuffer);
-            if (update.fileDesignator.size() > fileDesignator.size())
+            if(protocol==0)
             {
-                ChipLogError(SoftwareUpdate, "File designator size %u is too large to store",
-                             static_cast<unsigned int>(update.fileDesignator.size()));
-                requestorCore->RecordErrorUpdateState(CHIP_ERROR_BUFFER_TOO_SMALL);
-                return;
-            }
-            memcpy(fileDesignator.data(), update.fileDesignator.data(), update.fileDesignator.size());
-            fileDesignator.reduce_size(update.fileDesignator.size());
-            requestorCore->mFileDesignator = fileDesignator;
 
-            requestorCore->mOtaRequestorDriver->UpdateAvailable(update,
-                                                                System::Clock::Seconds32(response.delayedActionTime.ValueOr(0)));
+                // Store file designator needed for BDX transfers
+                MutableCharSpan fileDesignator(requestorCore->mFileDesignatorBuffer);
+                if (update.fileDesignator.size() > fileDesignator.size())
+                {
+                    ChipLogError(SoftwareUpdate, "File designator size %u is too large to store",
+                                static_cast<unsigned int>(update.fileDesignator.size()));
+                    requestorCore->RecordErrorUpdateState(CHIP_ERROR_BUFFER_TOO_SMALL);
+                    return;
+                }
+                memcpy(fileDesignator.data(), update.fileDesignator.data(), update.fileDesignator.size());
+                fileDesignator.reduce_size(update.fileDesignator.size());
+                requestorCore->mFileDesignator = fileDesignator;
+
+                requestorCore->mOtaRequestorDriver->UpdateAvailable(update,
+                                                                    System::Clock::Seconds32(response.delayedActionTime.ValueOr(0)));
+            }
+
+            else if (protocol==2)
+            {
+
+                printf("\nNeed to implement HTTPS download.\n");
+
+                requestorCore->mOtaRequestorDriver->UpdateAvailable(update,
+                                                                    System::Clock::Seconds32(response.delayedActionTime.ValueOr(0)));
+
+
+
+            }
+            else
+            {
+                printf("\nUnsupported Protocol.\n");
+            }
+
         }
         else
         {
@@ -731,7 +766,7 @@ CHIP_ERROR DefaultOTARequestor::SendQueryImageRequest(Messaging::ExchangeManager
 {
     VerifyOrReturnError(mProviderLocation.HasValue(), CHIP_ERROR_INCORRECT_STATE);
 
-    constexpr OTADownloadProtocol kProtocolsSupported[] = { OTADownloadProtocol::kBDXSynchronous };
+    constexpr OTADownloadProtocol kProtocolsSupported[] = { OTADownloadProtocol::kBDXSynchronous , OTADownloadProtocol::kHttps};
     QueryImage::Type args;
 
     uint16_t vendorId;
@@ -772,14 +807,34 @@ CHIP_ERROR DefaultOTARequestor::SendQueryImageRequest(Messaging::ExchangeManager
 CHIP_ERROR DefaultOTARequestor::ExtractUpdateDescription(const QueryImageResponseDecodableType & response,
                                                          UpdateDescription & update) const
 {
+
+    int protocol = -1;
+    std::string uriString(response.imageURI.HasValue() ? response.imageURI.Value().data() : "", response.imageURI.HasValue() ? response.imageURI.Value().size() : 0);
+
+    printf("\nImageURI: %s\n",uriString.c_str());
+
+    if(strncmp(uriString.c_str(), "bdx", 3)==0)
+    {
+        protocol = 0;
+    }
+    else if(strncmp(uriString.c_str(), "https", 5)==0)
+    {
+        protocol =2;
+    }
+
     NodeId nodeId;
     CharSpan fileDesignator;
 
     VerifyOrReturnError(response.imageURI.HasValue(), CHIP_ERROR_INVALID_ARGUMENT);
-    ReturnErrorOnFailure(bdx::ParseURI(response.imageURI.Value(), nodeId, fileDesignator));
-    VerifyOrReturnError(!fileDesignator.empty(), CHIP_ERROR_INVALID_ARGUMENT);
-    update.nodeId         = nodeId;
-    update.fileDesignator = fileDesignator;
+    if(protocol==0)
+    {
+        ReturnErrorOnFailure(bdx::ParseURI(response.imageURI.Value(), nodeId, fileDesignator));
+        VerifyOrReturnError(!fileDesignator.empty(), CHIP_ERROR_INVALID_ARGUMENT);
+        update.nodeId         = nodeId;
+        update.fileDesignator = fileDesignator;
+    }
+
+
 
     VerifyOrReturnError(response.softwareVersion.HasValue(), CHIP_ERROR_INVALID_ARGUMENT);
     VerifyOrReturnError(response.softwareVersionString.HasValue(), CHIP_ERROR_INVALID_ARGUMENT);

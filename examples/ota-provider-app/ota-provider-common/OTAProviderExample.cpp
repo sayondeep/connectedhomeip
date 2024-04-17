@@ -32,6 +32,8 @@
 #include <fstream>
 #include <string.h>
 
+#include <algorithm>
+
 using chip::BitFlags;
 using chip::ByteSpan;
 using chip::CharSpan;
@@ -268,32 +270,96 @@ void OTAProviderExample::SendQueryImageResponse(app::CommandHandler * commandObj
             }
         }
 
-        // Initialize the transfer session in prepartion for a BDX transfer
-        BitFlags<TransferControlFlags> bdxFlags;
-        bdxFlags.Set(TransferControlFlags::kReceiverDrive);
-        if (mBdxOtaSender.InitializeTransfer(commandObj->GetSubjectDescriptor().fabricIndex,
-                                             commandObj->GetSubjectDescriptor().subject) == CHIP_NO_ERROR)
+        auto iter = commandData.protocolsSupported.begin();
+        std::vector<chip::app::Clusters::OtaSoftwareUpdateProvider::DownloadProtocolEnum>supported_protocols;
+        while(iter.Next())
         {
-            CHIP_ERROR error =
-                mBdxOtaSender.PrepareForTransfer(&chip::DeviceLayer::SystemLayer(), chip::bdx::TransferRole::kSender, bdxFlags,
-                                                 kMaxBdxBlockSize, kBdxTimeout, chip::System::Clock::Milliseconds32(mPollInterval));
-            if (error != CHIP_NO_ERROR)
+            const chip::app::Clusters::OtaSoftwareUpdateProvider::DownloadProtocolEnum & entry = iter.GetValue();
+
+            ChipLogProgress(SoftwareUpdate, "Protocols Supported: %d", entry);
+
+            supported_protocols.push_back(entry);
+
+        }
+
+        sort(supported_protocols.begin(),supported_protocols.end());
+
+        switch(supported_protocols.back())
+        {
+
+            case DownloadProtocolEnum::kHttps:
             {
-                ChipLogError(SoftwareUpdate, "Cannot prepare for transfer: %" CHIP_ERROR_FORMAT, error.Format());
-                commandObj->AddStatus(commandPath, Status::Failure);
-                return;
+                printf("\nNeed to implement HTTPS OTA\n");
+                response.imageURI.Emplace(chip::CharSpan::fromCharString(mImageUri));
+                response.softwareVersion.Emplace(mSoftwareVersion);
+                response.softwareVersionString.Emplace(chip::CharSpan::fromCharString(mSoftwareVersionString));
+                response.updateToken.Emplace(chip::ByteSpan(updateToken));
+                break;
             }
 
-            response.imageURI.Emplace(chip::CharSpan::fromCharString(mImageUri));
-            response.softwareVersion.Emplace(mSoftwareVersion);
-            response.softwareVersionString.Emplace(chip::CharSpan::fromCharString(mSoftwareVersionString));
-            response.updateToken.Emplace(chip::ByteSpan(updateToken));
+            case DownloadProtocolEnum::kBDXSynchronous:
+            {
+                        // Initialize the transfer session in prepartion for a BDX transfer
+                BitFlags<TransferControlFlags> bdxFlags;
+                bdxFlags.Set(TransferControlFlags::kReceiverDrive);
+                if (mBdxOtaSender.InitializeTransfer(commandObj->GetSubjectDescriptor().fabricIndex,
+                                                        commandObj->GetSubjectDescriptor().subject) == CHIP_NO_ERROR)
+                {
+                    CHIP_ERROR error =
+                        mBdxOtaSender.PrepareForTransfer(&chip::DeviceLayer::SystemLayer(), chip::bdx::TransferRole::kSender, bdxFlags,
+                                                            kMaxBdxBlockSize, kBdxTimeout, chip::System::Clock::Milliseconds32(mPollInterval));
+                    if (error != CHIP_NO_ERROR)
+                    {
+                        ChipLogError(SoftwareUpdate, "Cannot prepare for transfer: %" CHIP_ERROR_FORMAT, error.Format());
+                        commandObj->AddStatus(commandPath, Status::Failure);
+                        return;
+                    }
+
+                    response.imageURI.Emplace(chip::CharSpan::fromCharString(mImageUri));
+                    response.softwareVersion.Emplace(mSoftwareVersion);
+                    response.softwareVersionString.Emplace(chip::CharSpan::fromCharString(mSoftwareVersionString));
+                    response.updateToken.Emplace(chip::ByteSpan(updateToken));
+                }
+                else
+                {
+                    // Another BDX transfer in progress
+                    mQueryImageStatus = OTAQueryStatus::kBusy;
+                }
+
+                break;
+            }
+
+            default :
+                ChipLogError(SoftwareUpdate, "Protocol Not Supported");
+
         }
-        else
-        {
-            // Another BDX transfer in progress
-            mQueryImageStatus = OTAQueryStatus::kBusy;
-        }
+
+        // // Initialize the transfer session in prepartion for a BDX transfer
+        // BitFlags<TransferControlFlags> bdxFlags;
+        // bdxFlags.Set(TransferControlFlags::kReceiverDrive);
+        // if (mBdxOtaSender.InitializeTransfer(commandObj->GetSubjectDescriptor().fabricIndex,
+        //                                      commandObj->GetSubjectDescriptor().subject) == CHIP_NO_ERROR)
+        // {
+        //     CHIP_ERROR error =
+        //         mBdxOtaSender.PrepareForTransfer(&chip::DeviceLayer::SystemLayer(), chip::bdx::TransferRole::kSender, bdxFlags,
+        //                                          kMaxBdxBlockSize, kBdxTimeout, chip::System::Clock::Milliseconds32(mPollInterval));
+        //     if (error != CHIP_NO_ERROR)
+        //     {
+        //         ChipLogError(SoftwareUpdate, "Cannot prepare for transfer: %" CHIP_ERROR_FORMAT, error.Format());
+        //         commandObj->AddStatus(commandPath, Status::Failure);
+        //         return;
+        //     }
+
+        //     response.imageURI.Emplace(chip::CharSpan::fromCharString(mImageUri));
+        //     response.softwareVersion.Emplace(mSoftwareVersion);
+        //     response.softwareVersionString.Emplace(chip::CharSpan::fromCharString(mSoftwareVersionString));
+        //     response.updateToken.Emplace(chip::ByteSpan(updateToken));
+        // }
+        // else
+        // {
+        //     // Another BDX transfer in progress
+        //     mQueryImageStatus = OTAQueryStatus::kBusy;
+        // }
     }
 
     // Delay action time is only applicable when the provider is busy
