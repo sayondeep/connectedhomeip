@@ -81,28 +81,37 @@ CHIP_ERROR InteractionModel::SubscribeAttribute(const char * identity, EndpointI
                                                 bool fabricFiltered, const Optional<DataVersion> & dataVersion,
                                                 const Optional<bool> & keepSubscriptions, const Optional<bool> & autoResubscribe)
 {
-    DeviceProxy * device = GetDevice(identity);
-    VerifyOrReturnError(device != nullptr, CHIP_ERROR_INCORRECT_STATE);
+    char ch;
+    c = getch();
 
-    std::vector<EndpointId> endpointIds   = { endpointId };
-    std::vector<ClusterId> clusterIds     = { clusterId };
-    std::vector<AttributeId> attributeIds = { attributeId };
-
-    Optional<std::vector<DataVersion>> dataVersions = Optional<std::vector<DataVersion>>();
-    if (dataVersion.HasValue())
+    if (c == 'y')
     {
-        dataVersions.Value().push_back(dataVersion.Value());
+        DeviceProxy * device = GetDevice(identity);
+        VerifyOrReturnError(device != nullptr, CHIP_ERROR_INCORRECT_STATE);
+
+        std::vector<EndpointId> endpointIds   = { endpointId };
+        std::vector<ClusterId> clusterIds     = { clusterId };
+        std::vector<AttributeId> attributeIds = { attributeId };
+
+        Optional<std::vector<DataVersion>> dataVersions = Optional<std::vector<DataVersion>>();
+        if (dataVersion.HasValue())
+        {
+            dataVersions.Value().push_back(dataVersion.Value());
+        }
+
+        InteractionModelReports::ResetOptions();
+        InteractionModelReports::SetMinInterval(minInterval);
+        InteractionModelReports::SetMaxInterval(maxInterval);
+        InteractionModelReports::SetFabricFiltered(fabricFiltered);
+        InteractionModelReports::SetDataVersions(dataVersions);
+        InteractionModelReports::SetKeepSubscriptions(keepSubscriptions);
+        InteractionModelReports::SetAutoResubscribe(autoResubscribe);
+
+        return InteractionModelReports::SubscribeAttribute(device, endpointIds, clusterIds, attributeIds);
     }
+    else
+        return CHIP_ERROR;
 
-    InteractionModelReports::ResetOptions();
-    InteractionModelReports::SetMinInterval(minInterval);
-    InteractionModelReports::SetMaxInterval(maxInterval);
-    InteractionModelReports::SetFabricFiltered(fabricFiltered);
-    InteractionModelReports::SetDataVersions(dataVersions);
-    InteractionModelReports::SetKeepSubscriptions(keepSubscriptions);
-    InteractionModelReports::SetAutoResubscribe(autoResubscribe);
-
-    return InteractionModelReports::SubscribeAttribute(device, endpointIds, clusterIds, attributeIds);
 }
 
 CHIP_ERROR InteractionModel::SubscribeEvent(const char * identity, EndpointId endpointId, ClusterId clusterId, EventId eventId,

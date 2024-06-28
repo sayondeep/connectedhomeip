@@ -34,6 +34,7 @@
 #include <messaging/ExchangeContext.h>
 #include <messaging/ExchangeMgr.h>
 #include <protocols/Protocols.h>
+#include <iostream>
 
 using namespace chip::Encoding;
 using namespace chip::Inet;
@@ -51,6 +52,10 @@ namespace Messaging {
  *    prior to use.
  *
  */
+
+System::Clock::Timestamp mFirstSubscribeTime;
+static constexpr System::Clock::Timeout kSubscriptionTimeout =
+        System::Clock::Milliseconds32(60000);
 ExchangeManager::ExchangeManager() : mReliableMessageMgr(mContextPool)
 {
     mState = State::kState_NotInitialized;
@@ -80,6 +85,11 @@ CHIP_ERROR ExchangeManager::Init(SessionManager * sessionManager)
     mReliableMessageMgr.Init(sessionManager->SystemLayer());
 
     mState = State::kState_Initialized;
+
+    mFirstSubscribeTime = System::SystemClock().GetMonotonicTimestamp();
+
+    ChipLogError(ExchangeManager,"\nSubscribe request timer started ");
+
 
     return err;
 }
@@ -219,6 +229,28 @@ void ExchangeManager::OnMessageReceived(const PacketHeader & packetHeader, const
                     payloadHeader.GetProtocolID().GetProtocolId(), payloadHeader.GetMessageType(), protocolName, msgTypeName);
 #endif
 
+    if(strcmp(msgTypeName,"SubscribeRequest")==0)
+    {
+        // char ch;
+        ChipLogError(ExchangeManager,"\nSubscribe request from " ChipLogFormatX64 " \n",ChipLogValueX64(session->GetPeer().GetNodeId()));
+        // std::cin>>ch;
+
+        // if(ch == 'n')
+        //     return;
+
+        System::Clock::Timestamp currentTimestamp = System::SystemClock().GetMonotonicTimestamp();
+
+        if (currentTimestamp - mFirstSubscribeTime > kSubscriptionTimeout)
+        {
+            ChipLogError(ExchangeManager,"\nSubscribe request from " ChipLogFormatX64 " REJECTED\n",ChipLogValueX64(session->GetPeer().GetNodeId()));
+            return;
+        }
+        else
+        {
+            ChipLogError(ExchangeManager,"\nSubscribe request from " ChipLogFormatX64 " ALLOWED\n",ChipLogValueX64(session->GetPeer().GetNodeId()));
+
+        }
+    }
     MessageFlags msgFlags;
     if (isDuplicate == DuplicateMessage::Yes)
     {
