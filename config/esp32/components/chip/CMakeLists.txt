@@ -340,8 +340,8 @@ endif()
 
 set(args_gn "${CMAKE_CURRENT_BINARY_DIR}/args.gn")
 add_custom_command(OUTPUT "${args_gn}"
-                   COMMAND ${python} 
-                           ${CMAKE_CURRENT_LIST_DIR}/create_args_gn.py 
+                   COMMAND ${python}
+                           ${CMAKE_CURRENT_LIST_DIR}/create_args_gn.py
                            "${CMAKE_BINARY_DIR}"
                            "${idf_path}"
                            "${CMAKE_CURRENT_LIST_DIR}/chip.c"
@@ -513,6 +513,23 @@ endif()
 idf_component_get_property(lwip_lib lwip COMPONENT_LIB)
 list(APPEND chip_libraries $<TARGET_FILE:${lwip_lib}>)
 
+if (CONFIG_IDF_TARGET_ESP32P4)
+    idf_component_get_property(esp_wifi_lib esp_wifi COMPONENT_LIB)
+    idf_component_get_property(esp_wifi_dir esp_wifi COMPONENT_DIR)
+    list(APPEND chip_libraries $<TARGET_FILE:${esp_wifi_lib}>)
+    # if (CONFIG_IDF_TARGET_ESP32C2)
+    #     set(blobs core net80211 pp)
+    # else()
+    #     set(blobs core mesh net80211 pp)
+    # endif()
+
+    # foreach(blob ${blobs})
+    # list(APPEND chip_libraries "${esp_wifi_dir}/lib/${target_name}/lib${blob}.a")
+    # endforeach()
+
+    # idf_component_get_property(wpa_supplicant_lib wpa_supplicant COMPONENT_LIB)
+    # list(APPEND chip_libraries $<TARGET_FILE:${wpa_supplicant_lib}>)
+endif()
 
 if (CONFIG_ESP32_WIFI_ENABLED)
     idf_component_get_property(esp_wifi_lib esp_wifi COMPONENT_LIB)
@@ -543,14 +560,18 @@ list(APPEND chip_libraries $<TARGET_FILE:${esp_netif_lib}>)
 idf_component_get_property(esp_hw_support_lib esp_hw_support COMPONENT_LIB)
 list(APPEND chip_libraries $<TARGET_FILE:${esp_hw_support_lib}>)
 
-idf_component_get_property(esp_phy_lib esp_phy COMPONENT_LIB)
-idf_component_get_property(esp_phy_dir esp_phy COMPONENT_DIR)
-list(APPEND chip_libraries $<TARGET_FILE:${esp_phy_lib}>)
+if (NOT CONFIG_IDF_TARGET_ESP32P4)
+    idf_component_get_property(esp_phy_lib esp_phy COMPONENT_LIB)
+    idf_component_get_property(esp_phy_dir esp_phy COMPONENT_DIR)
+    list(APPEND chip_libraries $<TARGET_FILE:${esp_phy_lib}>)
+endif()
 
 if (CONFIG_IDF_TARGET_ESP32)
     set(phy_blobs phy rtc)
 elseif (CONFIG_IDF_TARGET_ESP32S2)
     set(phy_blobs phy)
+elseif (CONFIG_IDF_TARGET_ESP32P4)
+    set(phy_blobs)
 else()
     set(phy_blobs phy btbb)
 endif()
@@ -558,7 +579,12 @@ foreach(phy_blob ${phy_blobs})
     list(APPEND chip_libraries "${esp_phy_dir}/lib/${target_name}/lib${phy_blob}.a")
 endforeach()
 
-set(components_to_link esp_event hal esp_system soc efuse vfs driver esp_coex freertos esp_timer)
+set(components_to_link esp_event hal esp_system soc efuse vfs driver freertos esp_timer)
+
+if (NOT CONFIG_IDF_TARGET_ESP32P4)
+    set(esp_coex)
+endif()
+
 idf_build_get_property(build_components BUILD_COMPONENTS)
 foreach(component ${components_to_link})
     # Some of the components are not present in IDF v4.x
