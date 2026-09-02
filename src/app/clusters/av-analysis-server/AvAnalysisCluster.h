@@ -127,6 +127,8 @@ public:
 
     void SetCameraClient(AvAnalysisCameraClient * aCameraClient) { mLogic.SetCameraClient(aCameraClient); }
 
+    void SetWebRTCClient(AvAnalysisWebRTCClient * aWebRTCClient) { mLogic.SetWebRTCClient(aWebRTCClient); }
+
     CHIP_ERROR Init() { return mLogic.Init(); }
 
     CHIP_ERROR Startup(ServerClusterContext & context) override;
