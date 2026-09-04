@@ -114,15 +114,108 @@ struct TestRemoteAvAnalysisCluster : public ::testing::Test
         int mCancelCount = 0;
     };
 
+    // Records WebRTC session interactions started by the command handlers; tests complete them by
+    // invoking the recorded Callback, simulating the camera's side of the signaling.
+    class FakeWebRTCClient : public AvAnalysisWebRTCClient
+    {
+    public:
+        int mSessionRequests = 0;
+        int mEndRequests     = 0;
+        ScopedNodeId mLastCamera;
+        EndpointId mLastEndpoint  = kInvalidEndpointId;
+        uint16_t mLastVideoStream = 0;
+        uint16_t mLastSessionId   = 0;
+        Callback * mLastCallback  = nullptr;
+
+        CHIP_ERROR RequestSession(const ScopedNodeId & aCameraNode, EndpointId aWebRTCEndpoint, uint16_t aVideoStreamId,
+                                  Callback & aCallback) override
+        {
+            mSessionRequests++;
+            mLastCamera      = aCameraNode;
+            mLastEndpoint    = aWebRTCEndpoint;
+            mLastVideoStream = aVideoStreamId;
+            mLastCallback    = &aCallback;
+            return CHIP_NO_ERROR;
+        }
+
+        CHIP_ERROR EndSession(const ScopedNodeId & aCameraNode, EndpointId aWebRTCEndpoint, uint16_t aWebRTCSessionId,
+                              Callback & aCallback) override
+        {
+            mEndRequests++;
+            mLastCamera    = aCameraNode;
+            mLastEndpoint  = aWebRTCEndpoint;
+            mLastSessionId = aWebRTCSessionId;
+            mLastCallback  = &aCallback;
+            return CHIP_NO_ERROR;
+        }
+
+        void Cancel() override
+        {
+            mCancelCount++;
+            mLastCallback = nullptr;
+        }
+
+        int mCancelCount = 0;
+    };
+
     void SetUp() override
     {
         mServer.SetDelegate(&mMockDelegate);
         mServer.SetCameraClient(&mFakeCameraClient);
+        mServer.SetWebRTCClient(&mFakeWebRTCClient);
         EXPECT_EQ(mServer.Startup(mClusterTester.GetServerClusterContext()), CHIP_NO_ERROR);
         EXPECT_EQ(mServer.Init(), CHIP_NO_ERROR);
     }
 
     void TearDown() override { mServer.Shutdown(ClusterShutdownType::kClusterShutdown); }
+
+    // One entry of a ContextTriggers command list, in an encodable-friendly shape
+    struct TestTrigger
+    {
+        Descriptor::Structs::SemanticTagStruct::Type context;
+        DataModel::Nullable<std::vector<uint16_t>> zones;
+    };
+
+    // Encodes a ContextTriggers list into aTlvBuffer and returns it as the nullable decodable
+    // list the command payload carries. aTlvBuffer must outlive the returned list.
+    DataModel::Nullable<DataModel::DecodableList<Structs::ContextTriggerStruct::DecodableType>>
+    EncodeContextTriggers(const std::vector<TestTrigger> & aTriggers, uint8_t * aTlvBuffer, size_t aTlvBufferSize)
+    {
+        TLV::TLVWriter writer;
+        writer.Init(aTlvBuffer, static_cast<uint32_t>(aTlvBufferSize));
+        TLV::TLVType arrayType;
+        EXPECT_EQ(writer.StartContainer(TLV::AnonymousTag(), TLV::kTLVType_Array, arrayType), CHIP_NO_ERROR);
+        for (const TestTrigger & spec : aTriggers)
+        {
+            Structs::ContextTriggerStruct::Type trigger;
+            trigger.context = spec.context;
+            if (spec.zones.IsNull())
+            {
+                trigger.zoneIDs = MakeOptional(DataModel::NullNullable);
+            }
+            else
+            {
+                trigger.zoneIDs = MakeOptional(
+                    DataModel::MakeNullable(DataModel::List<const uint16_t>(spec.zones.Value().data(), spec.zones.Value().size())));
+            }
+            EXPECT_EQ(DataModel::Encode(writer, TLV::AnonymousTag(), trigger), CHIP_NO_ERROR);
+        }
+        EXPECT_EQ(writer.EndContainer(arrayType), CHIP_NO_ERROR);
+
+        TLV::TLVReader reader;
+        reader.Init(aTlvBuffer, writer.GetLengthWritten());
+        EXPECT_EQ(reader.Next(), CHIP_NO_ERROR);
+        DataModel::DecodableList<Structs::ContextTriggerStruct::DecodableType> decodedList;
+        EXPECT_EQ(decodedList.Decode(reader), CHIP_NO_ERROR);
+        return DataModel::MakeNullable(decodedList);
+    }
+
+    DataModel::Nullable<DataModel::DecodableList<Structs::ContextTriggerStruct::DecodableType>>
+    EncodeContextTriggers(const Descriptor::Structs::SemanticTagStruct::Type & aContext,
+                          const DataModel::Nullable<std::vector<uint16_t>> & aZones, uint8_t * aTlvBuffer, size_t aTlvBufferSize)
+    {
+        return EncodeContextTriggers(std::vector<TestTrigger>{ { aContext, aZones } }, aTlvBuffer, aTlvBufferSize);
+    }
 
     // Sends EstablishAnalysisStream for the given camera node and completes the camera allocation
     // with the given status/stream id; returns the mock handler carrying response or status.
@@ -139,8 +232,28 @@ struct TestRemoteAvAnalysisCluster : public ::testing::Test
         mFakeCameraClient.mLastCallback->OnVideoStreamAllocated(aCameraStatus, aVideoStreamId);
     }
 
+    // Establishes-then-activates stream aAnalysisStreamId through the fakes: the offer exchange
+    // succeeds with aSessionId and the session goes active.
+    void ActivateStream(uint16_t aAnalysisStreamId, EndpointId aWebRTCEndpoint, uint16_t aSessionId)
+    {
+        Testing::MockCommandHandler activateHandler;
+        activateHandler.SetFabricIndex(1);
+        ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::ActivateAnalysisStream::Id };
+        Commands::ActivateAnalysisStream::DecodableType commandData;
+        commandData.analysisStreamID = aAnalysisStreamId;
+        commandData.webRTCEndpointID = MakeOptional(aWebRTCEndpoint);
+
+        auto response = mServer.GetLogic().HandleActivateAnalysisStream(activateHandler, path, commandData);
+        ASSERT_FALSE(response.has_value());
+        ASSERT_NE(mFakeWebRTCClient.mLastCallback, nullptr);
+        mFakeWebRTCClient.mLastCallback->OnSessionInitiated(Status::Success, aSessionId);
+        ASSERT_EQ(activateHandler.GetLastStatus().status.GetStatus(), Status::Success);
+        mFakeWebRTCClient.mLastCallback->OnSessionActive(aSessionId);
+    }
+
     MockAvAnalysisDelegate mMockDelegate;
     FakeCameraClient mFakeCameraClient;
+    FakeWebRTCClient mFakeWebRTCClient;
     AvAnalysisCluster mServer;
     ClusterTester mClusterTester;
 };
@@ -169,6 +282,239 @@ TEST_F(TestRemoteAvAnalysisCluster, TestCommands)
                                                   Commands::DeactivateAnalysisStream::kMetadataEntry,
                                                   Commands::RemoveAnalysisStream::kMetadataEntry,
                                               }));
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, EnableContextTriggersRequiresAnEstablishedStream)
+{
+    Testing::MockCommandHandler commandHandler;
+    commandHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::EnableContextTriggers::Id };
+    Commands::EnableContextTriggers::DecodableType commandData;
+    commandData.contextTriggers.SetNull();
+
+    // RemoteContextDetection and no established analysis stream, the command returns INVALID_IN_STATE
+    auto response = mServer.GetLogic().HandleEnableContextTriggers(commandHandler, path, commandData);
+    ASSERT_TRUE(response.has_value());
+    ASSERT_EQ(response.value().GetStatusCode().GetStatus(), Status::InvalidInState);
+
+    // No context triggers were enabled by the rejected command
+    Attributes::ActiveAmbientContextTriggers::TypeInfo::DecodableType active;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::ActiveAmbientContextTriggers::Id, active), CHIP_NO_ERROR);
+    size_t count = 0;
+    ASSERT_EQ(active.ComputeSize(&count), CHIP_NO_ERROR);
+    ASSERT_EQ(count, 0u);
+
+    // Once a stream is established the same command enables all the context triggers
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 7);
+
+    response = mServer.GetLogic().HandleEnableContextTriggers(commandHandler, path, commandData);
+    ASSERT_TRUE(response.has_value());
+    ASSERT_TRUE(response.value().IsSuccess());
+
+    // Null ContextTriggers means the whole supported set is enabled
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::ActiveAmbientContextTriggers::Id, active), CHIP_NO_ERROR);
+    ASSERT_EQ(active.ComputeSize(&count), CHIP_NO_ERROR);
+    ASSERT_EQ(count, testAmbientContexts.size());
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, EnableContextTriggersEnablesASpecificContext)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 7);
+
+    Testing::MockCommandHandler commandHandler;
+    commandHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::EnableContextTriggers::Id };
+    Commands::EnableContextTriggers::DecodableType commandData;
+    uint8_t tlvBuffer[128];
+    const std::vector<uint16_t> zoneIDs = { 1, 2 };
+    commandData.contextTriggers =
+        EncodeContextTriggers(testAmbientContexts.front(), DataModel::MakeNullable(zoneIDs), tlvBuffer, sizeof(tlvBuffer));
+
+    auto response = mServer.GetLogic().HandleEnableContextTriggers(commandHandler, path, commandData);
+    ASSERT_TRUE(response.has_value());
+    ASSERT_TRUE(response.value().IsSuccess());
+
+    // Exactly the requested context is enabled, carrying its zone list
+    Attributes::ActiveAmbientContextTriggers::TypeInfo::DecodableType active;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::ActiveAmbientContextTriggers::Id, active), CHIP_NO_ERROR);
+    auto iter = active.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().context.namespaceID, testAmbientContexts.front().namespaceID);
+    ASSERT_EQ(iter.GetValue().context.tag, testAmbientContexts.front().tag);
+    ASSERT_TRUE(iter.GetValue().zoneIDs.HasValue());
+    ASSERT_FALSE(iter.GetValue().zoneIDs.Value().IsNull());
+    std::vector<uint16_t> readZones;
+    auto zoneIter = iter.GetValue().zoneIDs.Value().Value().begin();
+    while (zoneIter.Next())
+    {
+        readZones.push_back(zoneIter.GetValue());
+    }
+    ASSERT_EQ(readZones, zoneIDs);
+    ASSERT_FALSE(iter.Next());
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, EnableContextTriggersRejectsAnUnsupportedContext)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 7);
+
+    Testing::MockCommandHandler commandHandler;
+    commandHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::EnableContextTriggers::Id };
+    Commands::EnableContextTriggers::DecodableType commandData;
+
+    // A context outside SupportedAmbientContexts (Sound.Snoring is not in the test set)
+    Descriptor::Structs::SemanticTagStruct::Type unsupportedContext = { std::nullopt, static_cast<uint8_t>(0x4A),
+                                                                        static_cast<uint8_t>(0x02), NullOptional };
+    uint8_t tlvBuffer[128];
+    commandData.contextTriggers = EncodeContextTriggers(unsupportedContext, DataModel::NullNullable, tlvBuffer, sizeof(tlvBuffer));
+
+    auto response = mServer.GetLogic().HandleEnableContextTriggers(commandHandler, path, commandData);
+    ASSERT_TRUE(response.has_value());
+    ASSERT_EQ(response.value().GetStatusCode().GetStatus(), Status::ConstraintError);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, EnableContextTriggersAppliesNothingWhenAnyTriggerIsInvalid)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 7);
+
+    // A valid trigger followed by an unsupported one: every validation failure must end
+    // processing with no other side-effects, so the valid trigger must not be armed either.
+    Descriptor::Structs::SemanticTagStruct::Type unsupportedContext = { std::nullopt, static_cast<uint8_t>(0x4A),
+                                                                        static_cast<uint8_t>(0x02), NullOptional };
+    std::vector<TestTrigger> triggers                               = {
+        { testAmbientContexts.front(), DataModel::MakeNullable(std::vector<uint16_t>{ 1, 2 }) },
+        { unsupportedContext, DataModel::NullNullable },
+    };
+    uint8_t tlvBuffer[256];
+    Testing::MockCommandHandler commandHandler;
+    commandHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::EnableContextTriggers::Id };
+    Commands::EnableContextTriggers::DecodableType commandData;
+    commandData.contextTriggers = EncodeContextTriggers(triggers, tlvBuffer, sizeof(tlvBuffer));
+
+    auto response = mServer.GetLogic().HandleEnableContextTriggers(commandHandler, path, commandData);
+    ASSERT_TRUE(response.has_value());
+    ASSERT_EQ(response.value().GetStatusCode().GetStatus(), Status::ConstraintError);
+
+    Attributes::ActiveAmbientContextTriggers::TypeInfo::DecodableType active;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::ActiveAmbientContextTriggers::Id, active), CHIP_NO_ERROR);
+    size_t count = 1;
+    ASSERT_EQ(active.ComputeSize(&count), CHIP_NO_ERROR);
+    ASSERT_EQ(count, 0u);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, EnableContextTriggersIgnoresDuplicateEntries)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 7);
+
+    // The same context twice with different zones: duplicates are ignored, the first wins
+    std::vector<TestTrigger> triggers = {
+        { testAmbientContexts.front(), DataModel::MakeNullable(std::vector<uint16_t>{ 1, 2 }) },
+        { testAmbientContexts.front(), DataModel::MakeNullable(std::vector<uint16_t>{ 3 }) },
+    };
+    uint8_t tlvBuffer[256];
+    Testing::MockCommandHandler commandHandler;
+    commandHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::EnableContextTriggers::Id };
+    Commands::EnableContextTriggers::DecodableType commandData;
+    commandData.contextTriggers = EncodeContextTriggers(triggers, tlvBuffer, sizeof(tlvBuffer));
+
+    auto response = mServer.GetLogic().HandleEnableContextTriggers(commandHandler, path, commandData);
+    ASSERT_TRUE(response.has_value());
+    ASSERT_TRUE(response.value().IsSuccess());
+
+    // Exactly one entry, carrying the first occurrence's zone list
+    Attributes::ActiveAmbientContextTriggers::TypeInfo::DecodableType active;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::ActiveAmbientContextTriggers::Id, active), CHIP_NO_ERROR);
+    auto iter = active.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_TRUE(iter.GetValue().zoneIDs.HasValue());
+    ASSERT_FALSE(iter.GetValue().zoneIDs.Value().IsNull());
+    std::vector<uint16_t> readZones;
+    auto zoneIter = iter.GetValue().zoneIDs.Value().Value().begin();
+    while (zoneIter.Next())
+    {
+        readZones.push_back(zoneIter.GetValue());
+    }
+    ASSERT_EQ(readZones, (std::vector<uint16_t>{ 1, 2 }));
+    ASSERT_FALSE(iter.Next());
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, AnalysisSessionRequiresASourceCameraOnARemoteNode)
+{
+    // Every event of a remote session names the camera the analyzed stream comes from, so a
+    // session cannot start without one
+    uint16_t sessionId = 0;
+    ASSERT_EQ(
+        mServer.GetLogic().AnalysisSessionStart(sessionId, DataModel::NullNullable, &mClusterTester.GetServerClusterContext()),
+        CHIP_ERROR_INVALID_ARGUMENT);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, EventsCarryTheSourceCameraOfTheSession)
+{
+    constexpr NodeId kSourceCamera        = 0xCA11;
+    constexpr uint64_t kStreamStartUs     = 123456789;
+    ServerClusterContext & clusterContext = mClusterTester.GetServerClusterContext();
+
+    // Arm all triggers (requires an established stream first)
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, kSourceCamera, Status::Success, 7);
+    Testing::MockCommandHandler enableHandler;
+    enableHandler.SetFabricIndex(1);
+    ConcreteCommandPath enablePath{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::EnableContextTriggers::Id };
+    Commands::EnableContextTriggers::DecodableType enableData;
+    enableData.contextTriggers.SetNull();
+    auto enableResponse = mServer.GetLogic().HandleEnableContextTriggers(enableHandler, enablePath, enableData);
+    ASSERT_TRUE(enableResponse.has_value() && enableResponse.value().IsSuccess());
+
+    // Session start: the event names the source camera
+    uint16_t sessionId = 0;
+    ASSERT_EQ(
+        mServer.GetLogic().AnalysisSessionStart(sessionId, DataModel::NullNullable, &clusterContext, kSourceCamera, kStreamStartUs),
+        CHIP_NO_ERROR);
+    auto startEvent = mClusterTester.GetNextGeneratedEvent();
+    ASSERT_TRUE(startEvent.has_value());
+    Events::AnalysisSessionStart::DecodableType startData;
+    ASSERT_EQ(startEvent->GetEventData(startData), CHIP_NO_ERROR);
+    ASSERT_TRUE(startData.sourceNodeId.HasValue());
+    ASSERT_EQ(startData.sourceNodeId.Value(), kSourceCamera);
+
+    // PerceivedContext: same camera, plus the stream's start timestamp
+    const std::vector<Structs::TrackedContext::Type> trackedContext = {
+        { .identifiedContextID = 0,
+          .identifiedContext   = { .namespaceID = static_cast<uint8_t>(0x49), .tag = static_cast<uint8_t>(0x0B) },
+          .startTime           = 0,
+          .endTime             = DataModel::NullNullable }
+    };
+    ASSERT_EQ(mServer.GetLogic().InitialTriggeringContextDetected(sessionId, trackedContext, &clusterContext), CHIP_NO_ERROR);
+    auto perceivedEvent = mClusterTester.GetNextGeneratedEvent();
+    ASSERT_TRUE(perceivedEvent.has_value());
+    Events::PerceivedContext::DecodableType perceivedData;
+    ASSERT_EQ(perceivedEvent->GetEventData(perceivedData), CHIP_NO_ERROR);
+    ASSERT_TRUE(perceivedData.sourceNodeId.HasValue());
+    ASSERT_EQ(perceivedData.sourceNodeId.Value(), kSourceCamera);
+    ASSERT_TRUE(perceivedData.sourceStartTimestamp.HasValue());
+    ASSERT_EQ(perceivedData.sourceStartTimestamp.Value(), kStreamStartUs);
+
+    // Session end: the source matches the associated AnalysisSessionStart
+    ASSERT_EQ(mServer.GetLogic().AnalysisSessionEnd(sessionId, &clusterContext), CHIP_NO_ERROR);
+    auto endEvent = mClusterTester.GetNextGeneratedEvent();
+    ASSERT_TRUE(endEvent.has_value());
+    Events::AnalysisSessionEnd::DecodableType endData;
+    ASSERT_EQ(endEvent->GetEventData(endData), CHIP_NO_ERROR);
+    ASSERT_TRUE(endData.sourceNodeId.HasValue());
+    ASSERT_EQ(endData.sourceNodeId.Value(), kSourceCamera);
 }
 
 TEST_F(TestRemoteAvAnalysisCluster, ReadAllAttributesWithClusterTesterTest)
@@ -216,26 +562,6 @@ TEST_F(TestRemoteAvAnalysisCluster, ReadAllAttributesWithClusterTesterTest)
     bool trackingEnabled = false;
     ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::TrackingEnabled::Id, trackingEnabled), CHIP_NO_ERROR);
     ASSERT_FALSE(trackingEnabled);
-}
-
-TEST_F(TestRemoteAvAnalysisCluster, ExecuteEnableContextTriggersCommandTest)
-{
-    Testing::MockCommandHandler commandHandler;
-    commandHandler.SetFabricIndex(1);
-    ConcreteCommandPath kCommandPath{ 1, Clusters::AvAnalysis::Id, Commands::EnableContextTriggers::Id };
-    Commands::EnableContextTriggers::DecodableType commandData;
-
-    auto response = mServer.GetLogic().HandleEnableContextTriggers(commandHandler, kCommandPath, commandData);
-
-    if (response.has_value())
-    {
-        ASSERT_TRUE(response.value().IsSuccess());
-    }
-    else
-    {
-        // Fail the test case
-        FAIL();
-    }
 }
 
 TEST_F(TestRemoteAvAnalysisCluster, ExecuteDisableContextTriggersCommandTest)
@@ -403,21 +729,303 @@ TEST_F(TestRemoteAvAnalysisCluster, ExecuteActivateAnalysisStreamCommandTest)
         FAIL();
     }
 
-    // TODO: activation is not implemented yet; no stream can leave PendingInitiation,
-    // so the placeholder responds INVALID_IN_STATE for a known stream.
+    ASSERT_EQ(mFakeWebRTCClient.mSessionRequests, 0);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, ActivateRequiresExactlyOneEndpointField)
+{
     Testing::MockCommandHandler establishHandler;
     establishHandler.SetFabricIndex(1);
     EstablishStream(establishHandler, 0x1234, Status::Success, 42);
+
+    Testing::MockCommandHandler commandHandler;
+    commandHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::ActivateAnalysisStream::Id };
+    Commands::ActivateAnalysisStream::DecodableType commandData;
     commandData.analysisStreamID = 0;
-    response                     = mServer.GetLogic().HandleActivateAnalysisStream(commandHandler, kCommandPath, commandData);
-    if (response.has_value())
-    {
-        ASSERT_TRUE(response->GetStatusCode() == Protocols::InteractionModel::ClusterStatusCode(Status::InvalidInState));
-    }
-    else
-    {
-        FAIL();
-    }
+
+    // Neither endpoint field selects a transport
+    auto response = mServer.GetLogic().HandleActivateAnalysisStream(commandHandler, path, commandData);
+    ASSERT_TRUE(response.has_value());
+    ASSERT_EQ(response.value().GetStatusCode().GetStatus(), Status::InvalidCommand);
+
+    // Both fields are ambiguous
+    commandData.webRTCEndpointID = MakeOptional(static_cast<EndpointId>(2));
+    commandData.pushAVEndpointID = MakeOptional(static_cast<EndpointId>(3));
+    response                     = mServer.GetLogic().HandleActivateAnalysisStream(commandHandler, path, commandData);
+    ASSERT_TRUE(response.has_value());
+    ASSERT_EQ(response.value().GetStatusCode().GetStatus(), Status::InvalidCommand);
+
+    ASSERT_EQ(mFakeWebRTCClient.mSessionRequests, 0);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, ActivateWithPushAVEndpointIsUnsupported)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 42);
+
+    Testing::MockCommandHandler commandHandler;
+    commandHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::ActivateAnalysisStream::Id };
+    Commands::ActivateAnalysisStream::DecodableType commandData;
+    commandData.analysisStreamID = 0;
+    commandData.pushAVEndpointID = MakeOptional(static_cast<EndpointId>(3));
+
+    auto response = mServer.GetLogic().HandleActivateAnalysisStream(commandHandler, path, commandData);
+    ASSERT_TRUE(response.has_value());
+    ASSERT_EQ(response.value().GetStatusCode().GetStatus(), Status::InvalidCommand);
+    ASSERT_EQ(mFakeWebRTCClient.mSessionRequests, 0);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, ActivateInitiatesAWebRTCSession)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 42);
+
+    Testing::MockCommandHandler activateHandler;
+    activateHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::ActivateAnalysisStream::Id };
+    Commands::ActivateAnalysisStream::DecodableType commandData;
+    commandData.analysisStreamID = 0;
+    commandData.webRTCEndpointID = MakeOptional(static_cast<EndpointId>(2));
+
+    auto response = mServer.GetLogic().HandleActivateAnalysisStream(activateHandler, path, commandData);
+    ASSERT_FALSE(response.has_value()); // Response is pending on the offer exchange
+
+    // The session request carries the camera, the provided endpoint, and the camera's VideoStreamID
+    ASSERT_EQ(mFakeWebRTCClient.mSessionRequests, 1);
+    ASSERT_EQ(mFakeWebRTCClient.mLastCamera, ScopedNodeId(0x1234, 1));
+    ASSERT_EQ(mFakeWebRTCClient.mLastEndpoint, 2);
+    ASSERT_EQ(mFakeWebRTCClient.mLastVideoStream, 42);
+
+    // A concurrent camera-bound command answers Busy while the offer exchange is in flight
+    Testing::MockCommandHandler busyHandler;
+    busyHandler.SetFabricIndex(1);
+    Commands::RemoveAnalysisStream::DecodableType removeData;
+    removeData.analysisStreamID = 0;
+    ConcreteCommandPath removePath{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::RemoveAnalysisStream::Id };
+    auto busyResponse = mServer.GetLogic().HandleRemoveAnalysisStream(busyHandler, removePath, removeData);
+    ASSERT_TRUE(busyResponse.has_value());
+    ASSERT_EQ(busyResponse.value().GetStatusCode().GetStatus(), Status::Busy);
+
+    // The camera assigns session 55: the entry records it and the command answers SUCCESS
+    ASSERT_NE(mFakeWebRTCClient.mLastCallback, nullptr);
+    mFakeWebRTCClient.mLastCallback->OnSessionInitiated(Status::Success, 55);
+    ASSERT_EQ(activateHandler.GetLastStatus().status.GetStatus(), Status::Success);
+
+    Attributes::AnalysisStreams::TypeInfo::DecodableType streams;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, streams), CHIP_NO_ERROR);
+    auto iter = streams.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kWebRTCInitiated);
+    ASSERT_TRUE(iter.GetValue().webRTCEndpointID.HasValue());
+    ASSERT_FALSE(iter.GetValue().webRTCEndpointID.Value().IsNull());
+    ASSERT_EQ(iter.GetValue().webRTCEndpointID.Value().Value(), 2);
+
+    // A second Activate on the initiated stream is a SUCCESS no-op
+    Testing::MockCommandHandler secondHandler;
+    secondHandler.SetFabricIndex(1);
+    auto secondResponse = mServer.GetLogic().HandleActivateAnalysisStream(secondHandler, path, commandData);
+    ASSERT_TRUE(secondResponse.has_value());
+    ASSERT_TRUE(secondResponse.value().IsSuccess());
+    ASSERT_EQ(mFakeWebRTCClient.mSessionRequests, 1);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, ActivateInitiationFailureIsPropagatedWithoutSideEffects)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 42);
+
+    Testing::MockCommandHandler activateHandler;
+    activateHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::ActivateAnalysisStream::Id };
+    Commands::ActivateAnalysisStream::DecodableType commandData;
+    commandData.analysisStreamID = 0;
+    commandData.webRTCEndpointID = MakeOptional(static_cast<EndpointId>(2));
+
+    auto response = mServer.GetLogic().HandleActivateAnalysisStream(activateHandler, path, commandData);
+    ASSERT_FALSE(response.has_value());
+
+    // Spec 11.9.8.5: no WebRTCTransportProvider on the camera surfaces as NOT_FOUND
+    ASSERT_NE(mFakeWebRTCClient.mLastCallback, nullptr);
+    mFakeWebRTCClient.mLastCallback->OnSessionInitiated(Status::NotFound, 0);
+    ASSERT_EQ(activateHandler.GetLastStatus().status.GetStatus(), Status::NotFound);
+
+    // The entry is untouched: still PendingInitiation, no endpoint, and activatable again
+    Attributes::AnalysisStreams::TypeInfo::DecodableType streams;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, streams), CHIP_NO_ERROR);
+    auto iter = streams.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kPendingInitiation);
+    ASSERT_TRUE(iter.GetValue().webRTCEndpointID.HasValue());
+    ASSERT_TRUE(iter.GetValue().webRTCEndpointID.Value().IsNull());
+
+    Testing::MockCommandHandler retryHandler;
+    retryHandler.SetFabricIndex(1);
+    auto retryResponse = mServer.GetLogic().HandleActivateAnalysisStream(retryHandler, path, commandData);
+    ASSERT_FALSE(retryResponse.has_value());
+    ASSERT_EQ(mFakeWebRTCClient.mSessionRequests, 2);
+
+    // Settle the retry: a mock handler must not outlive the test with an interaction parked on it
+    mFakeWebRTCClient.mLastCallback->OnSessionInitiated(Status::Success, 56);
+    ASSERT_EQ(retryHandler.GetLastStatus().status.GetStatus(), Status::Success);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, SessionActiveMarksTheStreamActive)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 42);
+    ActivateStream(0, 2, 55);
+
+    Attributes::AnalysisStreams::TypeInfo::DecodableType streams;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, streams), CHIP_NO_ERROR);
+    auto iter = streams.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kWebRTCActive);
+
+    // An unknown session going active changes nothing
+    mFakeWebRTCClient.mLastCallback->OnSessionActive(99);
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, streams), CHIP_NO_ERROR);
+    iter = streams.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kWebRTCActive);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, SessionFailureMarksTheStreamFailed)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 42);
+    ActivateStream(0, 2, 55);
+
+    // The flow failing at any point post-initiation marks the stream Failure.
+    // The dead session's id is forgotten; the endpoint stays until deactivation or re-activation.
+    mFakeWebRTCClient.mLastCallback->OnSessionFailed(55);
+
+    Attributes::AnalysisStreams::TypeInfo::DecodableType streams;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, streams), CHIP_NO_ERROR);
+    auto iter = streams.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kFailure);
+
+    // A repeated report for the dead session changes nothing
+    mFakeWebRTCClient.mLastCallback->OnSessionFailed(55);
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, streams), CHIP_NO_ERROR);
+    iter = streams.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kFailure);
+
+    // Failure is an activatable state: the stream can be re-initiated
+    ActivateStream(0, 2, 77);
+    ASSERT_EQ(mFakeWebRTCClient.mSessionRequests, 2);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, SessionFailureBeforeActiveMarksTheStreamFailed)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 42);
+
+    // Initiated but not yet active: the answer/ICE flow collapses
+    Testing::MockCommandHandler activateHandler;
+    activateHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::ActivateAnalysisStream::Id };
+    Commands::ActivateAnalysisStream::DecodableType commandData;
+    commandData.analysisStreamID = 0;
+    commandData.webRTCEndpointID = MakeOptional(static_cast<EndpointId>(2));
+    auto response                = mServer.GetLogic().HandleActivateAnalysisStream(activateHandler, path, commandData);
+    ASSERT_FALSE(response.has_value());
+    mFakeWebRTCClient.mLastCallback->OnSessionInitiated(Status::Success, 55);
+    ASSERT_EQ(activateHandler.GetLastStatus().status.GetStatus(), Status::Success);
+
+    mFakeWebRTCClient.mLastCallback->OnSessionFailed(55);
+
+    Attributes::AnalysisStreams::TypeInfo::DecodableType streams;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, streams), CHIP_NO_ERROR);
+    auto iter = streams.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kFailure);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, DeactivateEndsTheSession)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 42);
+    ActivateStream(0, 2, 55);
+
+    Testing::MockCommandHandler deactivateHandler;
+    deactivateHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::DeactivateAnalysisStream::Id };
+    Commands::DeactivateAnalysisStream::DecodableType commandData;
+    commandData.analysisStreamID = 0;
+
+    auto response = mServer.GetLogic().HandleDeactivateAnalysisStream(deactivateHandler, path, commandData);
+    ASSERT_FALSE(response.has_value()); // Response is pending on the camera's EndSession answer
+
+    // once EndSession is sent the stream is WebRTCPendingDeactivation
+    Attributes::AnalysisStreams::TypeInfo::DecodableType pendingStreams;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, pendingStreams), CHIP_NO_ERROR);
+    auto pendingIter = pendingStreams.begin();
+    ASSERT_TRUE(pendingIter.Next());
+    ASSERT_EQ(pendingIter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kWebRTCPendingDeactivation);
+
+    // EndSession names the camera, the stored endpoint, and the stored session id
+    ASSERT_EQ(mFakeWebRTCClient.mEndRequests, 1);
+    ASSERT_EQ(mFakeWebRTCClient.mLastCamera, ScopedNodeId(0x1234, 1));
+    ASSERT_EQ(mFakeWebRTCClient.mLastEndpoint, 2);
+    ASSERT_EQ(mFakeWebRTCClient.mLastSessionId, 55);
+
+    // The camera confirms: back to an activatable stream with no session associations
+    mFakeWebRTCClient.mLastCallback->OnSessionEnded(Status::Success, 55);
+    ASSERT_EQ(deactivateHandler.GetLastStatus().status.GetStatus(), Status::Success);
+
+    Attributes::AnalysisStreams::TypeInfo::DecodableType streams;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, streams), CHIP_NO_ERROR);
+    auto iter = streams.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kPendingInitiation);
+    ASSERT_TRUE(iter.GetValue().webRTCEndpointID.HasValue());
+    ASSERT_TRUE(iter.GetValue().webRTCEndpointID.Value().IsNull());
+
+    // The stream is activatable again
+    ActivateStream(0, 2, 77);
+    ASSERT_EQ(mFakeWebRTCClient.mSessionRequests, 2);
+}
+
+TEST_F(TestRemoteAvAnalysisCluster, DeactivateFailureMarksTheStreamFailed)
+{
+    Testing::MockCommandHandler establishHandler;
+    establishHandler.SetFabricIndex(1);
+    EstablishStream(establishHandler, 0x1234, Status::Success, 42);
+    ActivateStream(0, 2, 55);
+
+    Testing::MockCommandHandler deactivateHandler;
+    deactivateHandler.SetFabricIndex(1);
+    ConcreteCommandPath path{ kTestEndpointId, Clusters::AvAnalysis::Id, Commands::DeactivateAnalysisStream::Id };
+    Commands::DeactivateAnalysisStream::DecodableType commandData;
+    commandData.analysisStreamID = 0;
+
+    auto response = mServer.GetLogic().HandleDeactivateAnalysisStream(deactivateHandler, path, commandData);
+    ASSERT_FALSE(response.has_value());
+
+    // The camera's failure is propagated and the stream is marked Failure
+    mFakeWebRTCClient.mLastCallback->OnSessionEnded(Status::NotFound, 55);
+    ASSERT_EQ(deactivateHandler.GetLastStatus().status.GetStatus(), Status::NotFound);
+
+    Attributes::AnalysisStreams::TypeInfo::DecodableType streams;
+    ASSERT_EQ(mClusterTester.ReadAttribute(Attributes::AnalysisStreams::Id, streams), CHIP_NO_ERROR);
+    auto iter = streams.begin();
+    ASSERT_TRUE(iter.Next());
+    ASSERT_EQ(iter.GetValue().analysisStreamState, AnalysisStreamStateEnum::kFailure);
+
+    // Failure is an activatable state: the stream can be re-initiated
+    ActivateStream(0, 2, 77);
+    ASSERT_EQ(mFakeWebRTCClient.mSessionRequests, 2);
 }
 
 TEST_F(TestRemoteAvAnalysisCluster, ExecuteDeactivateAnalysisStreamCommandTest)
@@ -439,8 +1047,7 @@ TEST_F(TestRemoteAvAnalysisCluster, ExecuteDeactivateAnalysisStreamCommandTest)
         FAIL();
     }
 
-    // TODO: deactivation is not implemented yet; no stream can be in an active state,
-    // so INVALID_IN_STATE is sent as response for a known stream.
+    // only an active stream may be deactivated
     Testing::MockCommandHandler establishHandler;
     establishHandler.SetFabricIndex(1);
     EstablishStream(establishHandler, 0x1234, Status::Success, 42);

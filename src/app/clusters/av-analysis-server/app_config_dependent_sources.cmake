@@ -24,6 +24,7 @@ TARGET_SOURCES(
   ${APP_TARGET}
   PRIVATE
     "${CLUSTER_DIR}/AvAnalysisCameraClient.h"
+    "${CLUSTER_DIR}/AvAnalysisWebRTCClient.h"
     "${CLUSTER_DIR}/AvAnalysisCameraInteraction.h"
     "${CLUSTER_DIR}/AvAnalysisCluster.cpp"
     "${CLUSTER_DIR}/AvAnalysisCluster.h"
@@ -33,4 +34,6 @@ TARGET_SOURCES(
     "${CLUSTER_DIR}/AvAnalysisStreamTable.h"
     "${CLUSTER_DIR}/DefaultAvAnalysisCameraClient.cpp"
     "${CLUSTER_DIR}/DefaultAvAnalysisCameraClient.h"
+    "${CLUSTER_DIR}/DefaultAvAnalysisWebRTCClient.cpp"
+    "${CLUSTER_DIR}/DefaultAvAnalysisWebRTCClient.h"
 )

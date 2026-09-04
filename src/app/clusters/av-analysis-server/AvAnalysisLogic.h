@@ -25,6 +25,7 @@
 #include <app/clusters/av-analysis-server/AvAnalysisCameraInteraction.h>
 #include <app/clusters/av-analysis-server/AvAnalysisStorage.h>
 #include <app/clusters/av-analysis-server/AvAnalysisStreamTable.h>
+#include <app/clusters/av-analysis-server/AvAnalysisWebRTCClient.h>
 #include <app/data-model-provider/ActionReturnStatus.h>
 #include <app/data-model-provider/MetadataTypes.h>
 #include <app/persistence/AttributePersistenceProvider.h>
@@ -45,7 +46,7 @@ class AvAnalysisDelegate;
 // Callback type for notifying attribute changes
 using MarkDirtyCallback = std::function<void(AttributeId)>;
 
-class AvAnalysisServerLogic : public AvAnalysisCameraClient::Callback
+class AvAnalysisServerLogic : public AvAnalysisCameraClient::Callback, public AvAnalysisWebRTCClient::Callback
 {
 public:
     /**
@@ -81,8 +82,19 @@ public:
      */
     void SetCameraClient(AvAnalysisCameraClient * aCameraClient) { mCameraClient = aCameraClient; }
 
+    /**
+     * Sets the WebRTC client used by a RemoteContextDetection instance to initiate/end the WebRTC
+     * sessions carrying analysis streams (not used with LocalContextDetection).
+     */
+    void SetWebRTCClient(AvAnalysisWebRTCClient * aWebRTCClient) { mWebRTCClient = aWebRTCClient; }
+
     void OnVideoStreamAllocated(Protocols::InteractionModel::Status aStatus, uint16_t aVideoStreamId) override;
     void OnVideoStreamDeallocated(Protocols::InteractionModel::Status aStatus, uint16_t aVideoStreamId) override;
+
+    void OnSessionInitiated(Protocols::InteractionModel::Status aStatus, uint16_t aWebRTCSessionId) override;
+    void OnSessionActive(uint16_t aWebRTCSessionId) override;
+    void OnSessionFailed(uint16_t aWebRTCSessionId) override;
+    void OnSessionEnded(Protocols::InteractionModel::Status aStatus, uint16_t aWebRTCSessionId) override;
 
     EndpointId mEndpointId = kInvalidEndpointId;
 
@@ -146,7 +158,8 @@ public:
 
     // Active context tracking and events
     CHIP_ERROR AnalysisSessionStart(uint16_t & aSessionId, const DataModel::Nullable<std::vector<uint16_t>> & aZoneList,
-                                    ServerClusterContext * aContext);
+                                    ServerClusterContext * aContext, NodeId aSourceNodeId = kUndefinedNodeId,
+                                    uint64_t aSourceStartTimestampUs = 0);
 
     CHIP_ERROR InitialTriggeringContextDetected(uint16_t aSessionId,
                                                 const std::vector<AvAnalysis::Structs::TrackedContext::Type> & aTriggeringContext,
@@ -164,6 +177,7 @@ public:
 private:
     AvAnalysisDelegate * mDelegate                               = nullptr;
     AvAnalysisCameraClient * mCameraClient                       = nullptr;
+    AvAnalysisWebRTCClient * mWebRTCClient                       = nullptr;
     AttributePersistenceProvider * mAttributePersistenceProvider = nullptr;
     uint16_t mNextAnalysisSessionID                              = 0;
     std::vector<AvAnalysis::ActiveAmbientContextSession> mActiveSessions;
@@ -187,18 +201,14 @@ private:
     void MarkDirty(AttributeId aAttributeId);
 
     /**
-     * Command sub-handlers
+     * Abandons the in-flight camera interaction, if any, on whichever client carries it.
      */
-    std::optional<DataModel::ActionReturnStatus>
-    HandleLocalEnableContextTriggers(CommandHandler & handler, const ConcreteCommandPath & commandPath,
-                                     const AvAnalysis::Commands::EnableContextTriggers::DecodableType & commandData);
-    std::optional<DataModel::ActionReturnStatus>
-    HandleRemoteEnableContextTriggers(CommandHandler & handler, const ConcreteCommandPath & commandPath,
-                                      const AvAnalysis::Commands::EnableContextTriggers::DecodableType & commandData);
+    void CancelCameraInteraction();
 
     /*
      * Command and event handler helper methods
      */
+    AvAnalysis::AnalysisStreamEntry * FindByWebRTCSession(uint16_t aWebRTCSessionId);
     bool ZoneIDListContains(const DataModel::DecodableList<uint16_t> list, uint16_t value);
     bool IsContextPartOfActiveContextTriggers(const std::vector<AvAnalysis::Structs::TrackedContext::Type> & aContext);
 
